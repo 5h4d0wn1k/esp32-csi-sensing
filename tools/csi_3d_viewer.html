@@ -53,7 +53,9 @@
       Drag to rotate, wheel to zoom, right-drag to pan.</div>
     <div class="note" id="motionNote" style="font-size:15px;font-weight:bold">MOTION: --</div>
     <div class="note" id="motionThr">calibrating...</div>
+    <div class="note" id="motionSig">signal: --</div>
     <div class="note" id="rssiNote">RSSI: --</div>
+    <button id="recalBtn" title="Reset the motion baseline + threshold">Recalibrate</button>
     <canvas id="spark"></canvas>
     <div class="note" id="sparkNote">RSSI over time</div>
     <canvas id="mspark"></canvas>
@@ -81,7 +83,7 @@ const statsEl = document.getElementById('stats');
 const statusEl = document.getElementById('status');
 const btnPause = document.getElementById('btnPause');
 const btnWire = document.getElementById('btnWire');
-const VER = '5.2';
+const VER = '5.5';
 statusEl.textContent = 'v' + VER + ' — click "Connect Hub"';
 
 let ws = null, port = null, reader = null;
@@ -91,8 +93,10 @@ let frames = [], srcName = '-';
 let count = 0, fps = 0, lastTs = 0, rssiHist = [];
 
 // ---- host-side motion detection (all processing here in the browser) ----
-const MWIN = 30, MDEB = 2;
-let mState = 'INACTIVE', mHold = 0, mThr = null, mCal = [];
+const MVAR_MS = 1500, MCAL_MS = 5000, M_THR_RATIO = 1.5, M_ON = 1.0, M_OFF = 3.0,
+      M_LEVEL_Q = 0.95, M_TRANSIENT_DB = 2.0;
+let mState = 'INACTIVE', tUp = 0, tDown = 0, mThr = null, mCal = [], mCal0 = 0,
+    mVarHist = [], mRing = [];
 let mHist = [];
 let phs = [];
 
@@ -164,7 +168,9 @@ try {
     N_SUB = nSub;
     controls.target.set(60, 20, N_SUB / 2);
     makeSurface(nSub);
-    frames.length = 0; phs.length = 0; mHist.length = 0; mCal.length = 0; mThr = null; rssiHist.length = 0;
+    frames.length = 0; phs.length = 0; mHist.length = 0; mCal.length = 0; mCal0 = 0;
+    mThr = null; mVarHist.length = 0; mRing.length = 0;
+    mState = 'INACTIVE'; tUp = 0; tDown = 0; rssiHist.length = 0;
     srcCounts = {}; activeMac = null; lastSrcEval = 0;
   };
 
@@ -248,7 +254,7 @@ function handleFrame(r) {
     rssiHist.push(r.rssi);
     if (rssiHist.length > 300) rssiHist.shift();
   }
-  runMotion(r.amp);
+  runMotion(r.amp, r.rssi);
   drawSpark(); drawMSpark();
   statsEl.textContent =
     `src:${srcName}` + (activeMac ? ` [${activeMac}]` : '') +
@@ -258,65 +264,104 @@ function handleFrame(r) {
     document.getElementById('rssiNote').textContent = `RSSI: ${r.rssi} dBm`;
 }
 
-function runMotion(amp) {
+function runMotion(amp, rssi) {
   if (frames.length < 2) return;
-  const win = frames.slice(-Math.min(MWIN, frames.length));
-  const pwin = phs.slice(-win.length);
-  const hasPh = phs.length === frames.length && pwin.every(p => p && p.length === N_SUB);
+  const now = performance.now();
+  const win = frames.slice(-Math.min(30, frames.length));
   // Per-frame normalisation: divide each frame by its own mean magnitude so the
   // receiver AGC gain steps (2x jumps) cancel out and only the CSI *shape* change
-  // from body motion remains.
+  // from body motion remains. Metric = mean absolute normalised amplitude
+  // deviation from the short-window baseline (validated on router link: static
+  // variance ~0.01, body motion ~0.05+).
   const mag = (f) => { let s = 0; for (const v of f) s += v; return s / f.length + 1e-6; };
   const winMag = win.map(mag), curMag = mag(amp);
-  let dev;
-  if (hasPh) {
-    const cur = pwin[pwin.length - 1];
-    let acc = 0;
-    for (let s = 0; s < N_SUB; s++) {
-      let re = 0, im = 0;
-      for (let k = 0; k < win.length; k++) {
-        const ph = pwin[k][s] * Math.PI / 180, a = win[k][s] / winMag[k];
-        re += a * Math.cos(ph); im += a * Math.sin(ph);
+  const base = new Float32Array(N_SUB);
+  for (let k = 0; k < win.length; k++)
+    for (let s = 0; s < N_SUB; s++) base[s] += win[k][s] / winMag[k];
+  for (let s = 0; s < N_SUB; s++) base[s] /= win.length;
+  let acc = 0;
+  for (let s = 0; s < N_SUB; s++) acc += Math.abs(amp[s] / curMag - base[s]);
+  const dev = acc / N_SUB;
+  // AGC transient rejection with a 3-frame commit delay. An AGC gain step is a
+  // >2 dB RSSI jump between consecutive frames and looks exactly like body motion
+  // in the shape metric (corr(dev,rssi)~0.9), so it must not count. Each frame's
+  // flag is only final once jumps at [idx-3, idx+2] are known, hence the delay.
+  mRing.push({ t: now, rssi: (rssi === undefined ? null : rssi), v: dev });
+  if (mRing.length > 12) mRing.shift();
+  if (mRing.length >= 4) {
+    const c = mRing[mRing.length - 4];
+    let bad = false;
+    if (c.rssi !== null) {
+      for (let j = Math.max(1, mRing.length - 7); j <= mRing.length - 2 && !bad; j++) {
+        const a = mRing[j].rssi, b = mRing[j - 1].rssi;
+        if (a !== null && b !== null && Math.abs(a - b) > M_TRANSIENT_DB) bad = true;
       }
-      re /= win.length; im /= win.length;
-      const a0 = Math.hypot(re, im) + 1e-6;
-      const ph = cur[s] * Math.PI / 180, a = amp[s] / curMag;
-      acc += Math.hypot(a * Math.cos(ph) - re, a * Math.sin(ph) - im) / a0;
     }
-    dev = acc / N_SUB;
-  } else {
-    let base = new Float32Array(N_SUB);
-    for (let k = 0; k < win.length; k++)
-      for (let s = 0; s < N_SUB; s++) base[s] += win[k][s] / winMag[k];
-    for (let s = 0; s < N_SUB; s++) base[s] /= win.length;
-    let acc = 0;
-    for (let s = 0; s < N_SUB; s++) acc += Math.abs(amp[s] / curMag - base[s]) / (base[s] + 1e-6);
-    dev = acc / N_SUB;
+    if (!bad) {
+      mHist.push({ t: c.t, v: c.v });
+      if (mHist.length > 4000) mHist.shift();
+    }
   }
-  mHist.push(dev);
-  if (mHist.length > 300) mHist.shift();
+  const varDev = rollingStd(mHist, now, MVAR_MS);
+  if (varDev !== null) {
+    mVarHist.push(varDev);
+    if (mVarHist.length > 600) mVarHist.shift();
+  }
+  // Decision level = 95th percentile of varDev over the last ~6s. Motion is
+  // sporadic (a body is only momentarily in a sensitive spot); the tail captures
+  // it while a stable static floor stays far below.
+  const level = quantile(mVarHist, M_LEVEL_Q);
   if (mThr === null) {
-    mCal.push(dev);
-    if (mCal.length >= MWIN) {
-      const srt = [...mCal].sort((a, b) => a - b);
-      const med = srt[srt.length >> 1];
-      const absd = mCal.map(d => Math.abs(d - med)).sort((a, b) => a - b);
-      const mad = absd[absd.length >> 1] * 1.4826 || 1e-6;
-      mThr = med + 3 * mad;   // robust median+MAD threshold (immune to AGC spikes)
+    if (level !== null) mCal.push(level);
+    if (mCal0 === 0) mCal0 = now;
+    if (mCal.length >= 40 && now - mCal0 >= MCAL_MS) {
+      mThr = quantile(mCal, 0.9) * M_THR_RATIO;
       document.getElementById('motionThr').textContent =
-        `threshold: ${mThr.toFixed(2)} (median+MAD on first ${MWIN} frames)`;
+        `threshold: ${mThr.toFixed(3)} (cal ${(now - mCal0) / 1000 | 0}s, p90×${M_THR_RATIO})`;
+      document.getElementById('recalBtn').disabled = false;
     } else {
       document.getElementById('motionThr').textContent =
-        `calibrating static baseline... ${mCal.length}/${MWIN}`;
+        `calibrating static baseline... ${mCal.length} samples / ${(now - mCal0) / 1000 | 0}s`;
     }
     return;
   }
-  const want = dev > mThr ? 'ACTIVE' : 'INACTIVE';
-  if (want !== mState) { if (++mHold >= MDEB) { mState = want; mHold = 0; } }
-  else mHold = 0;
+  // Time-based hysteresis on the LEVEL: ACTIVE only after it stays above the
+  // threshold for M_ON s; INACTIVE after M_OFF s of quiet.
+  if (level > mThr) tUp = now; else tDown = now;
+  if (mState === 'INACTIVE' && now - tDown >= M_ON * 1000) mState = 'ACTIVE';
+  if (mState === 'ACTIVE' && now - tUp >= M_OFF * 1000) mState = 'INACTIVE';
   const el = document.getElementById('motionNote');
   el.textContent = 'MOTION: ' + mState;
   el.style.color = mState === 'ACTIVE' ? '#f85149' : '#3fb950';
+  document.getElementById('motionSig').textContent =
+    `signal(p95): ${level === null ? '--' : level.toFixed(3)}  (threshold ${mThr.toFixed(3)})`;
+}
+
+function quantile(arr, q) {
+  if (arr.length < 8) return null;
+  const srt = [...arr].sort((a, b) => a - b);
+  return srt[Math.min(srt.length - 1, (srt.length * q) | 0)];
+}
+
+function rollingStd(arr, now, winMs) {
+  const cutoff = now - winMs;
+  let i = arr.length - 1;
+  while (i >= 0 && arr[i].t > cutoff) i--;
+  const sub = arr.slice(i + 1);
+  if (sub.length < 8) return null;
+  let mean = 0;
+  for (const s of sub) mean += s.v;
+  mean /= sub.length;
+  let sse = 0;
+  for (const s of sub) { const d = s.v - mean; sse += d * d; }
+  return Math.sqrt(sse / sub.length);
+}
+
+function recalibrate() {
+  mState = 'INACTIVE'; tUp = 0; tDown = 0; mThr = null;
+  mCal.length = 0; mCal0 = 0; mVarHist.length = 0; mRing.length = 0;
+  document.getElementById('recalBtn').disabled = true;
+  document.getElementById('motionThr').textContent = 'recalibrating...';
 }
 
 // ---------- WebSocket hub (primary) ----------
@@ -427,7 +472,7 @@ function drawMSpark() {
   mctx.clearRect(0, 0, w, h);
   const n = mHist.length;
   if (n < 2) return;
-  const clean = mHist.filter(v => Number.isFinite(v));
+  const clean = mHist.map(s => s.v).filter(v => Number.isFinite(v));
   if (clean.length < 2) return;
   const mx = Math.max(...clean, mThr || 1);
   mctx.strokeStyle = '#f0883e'; mctx.lineWidth = 2;
@@ -461,6 +506,9 @@ btnWire.onclick = () => {
 };
 document.getElementById('btnHub').onclick = connectHub;
 document.getElementById('btnSerial').onclick = connectSerial;
+const recalBtn = document.getElementById('recalBtn');
+recalBtn.disabled = true;
+recalBtn.onclick = recalibrate;
 
 // auto-connect when opened as ?auto=1 (also used for headless tests)
 if (new URLSearchParams(location.search).has('auto')) connectHub();
