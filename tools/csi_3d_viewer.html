@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ESP32-CSI 3D Viewer</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin:0; background:#0d1117; color:#e6edf3;
+         font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  #bar { display:flex; gap:10px; align-items:center; flex-wrap:wrap;
+         padding:10px 14px; background:#161b22; border-bottom:1px solid #30363d; }
+  button { background:#21262d; color:#e6edf3; border:1px solid #30363d;
+           padding:7px 14px; border-radius:6px; cursor:pointer; font:inherit; }
+  button:hover { background:#30363d; }
+  button.primary { background:#238636; border-color:#2ea043; }
+  button.danger { background:#6e1f1f; border-color:#a24040; }
+  #status { font-size:12px; color:#8b949e; white-space:pre; }
+  #stats { font-size:12px; color:#58a6ff; }
+  #wrap { display:flex; }
+  #view3d { flex:1; height:calc(100vh - 60px); }
+  #side { width:270px; border-left:1px solid #30363d; padding:10px;
+          display:flex; flex-direction:column; gap:8px; }
+  canvas#spark { width:100%; height:90px; background:#0d1117;
+                 border:1px solid #30363d; }
+  .note { font-size:11px; color:#8b949e; }
+  input[type=file] { color:#e6edf3; }
+</style>
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="bar">
+  <button id="btnConnect" class="primary">Connect (Web Serial)</button>
+  <button id="btnPause">Pause</button>
+  <button id="btnWire">Wireframe</button>
+  <label class="note">Load capture: <input type="file" id="file" accept=".csv"></label>
+  <span id="stats"></span>
+  <span id="status">Not connected</span>
+</div>
+<div id="wrap">
+  <div id="view3d"></div>
+  <div id="side">
+    <div class="note">Amplitude surface: X = time, Z = subcarrier, Y = amplitude.
+      Drag to rotate, wheel to zoom, right-drag to pan.</div>
+    <div class="note" id="rssiNote">RSSI: --</div>
+    <canvas id="spark"></canvas>
+    <div class="note" id="sparkNote">RSSI over time</div>
+  </div>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const N_SUB = 192, MAX_FRAMES = 150;
+const RE = /^CSI_DATA,(\d+),([0-9a-f:]+),(-?\d+),(\d+),(\d+),(\d+),(\d+),(\d+),(\d+),(\d+),(\d+),(\d+),(\d+),(-?\d+),(\d+),(\d+),(\d+),(\d+),(\d+),(\d+),(\d+),(\d+),(\d+),"(\[[^\]]*\])"$/;
+
+const statsEl = document.getElementById('stats');
+const statusEl = document.getElementById('status');
+const btnPause = document.getElementById('btnPause');
+const btnWire = document.getElementById('btnWire');
+
+let port = null, reader = null, paused = false, wireframe = false;
+let frames = [];            // ring of Float32Array(N_SUB)
+let count = 0, fps = 0, lastTs = 0;
+let rssiHist = [];
+
+// ---------- parser ----------
+function parseCsiLine(line) {
+  const m = RE.exec(line);
+  if (!m) return null;
+  const arr = m[24].slice(1, -1).split(',');
+  const n = arr.length >> 1 << 1;
+  const amp = new Float32Array(n / 2);
+  for (let i = 0; i < n; i += 2) {
+    const im = parseInt(arr[i], 10), re = parseInt(arr[i + 1], 10);
+    amp[i >> 1] = Math.hypot(im, re);
+  }
+  return { rssi: parseInt(m[3], 10), channel: parseInt(m[16], 10), amp };
+}
+
+// ---------- 3D scene ----------
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0d1117);
+const camera = new THREE.PerspectiveCamera(55, 2, 0.1, 2000);
+camera.position.set(90, 55, 120);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+document.getElementById('view3d').appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(60, 20, N_SUB / 2);
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+const dl = new THREE.DirectionalLight(0xffffff, 0.8);
+dl.position.set(80, 120, 40);
+scene.add(dl);
+
+const gridGeom = new THREE.BufferGeometry();
+const verts = N_SUB * MAX_FRAMES;
+const pos = new Float32Array(verts * 3);
+const col = new Float32Array(verts * 3);
+const idx = [];
+for (let f = 0; f < MAX_FRAMES - 1; f++) {
+  for (let s = 0; s < N_SUB - 1; s++) {
+    const a = f * N_SUB + s, b = a + 1, c = a + N_SUB, d = c + 1;
+    idx.push(a, b, c, b, d, c);
+  }
+}
+gridGeom.setIndex(idx);
+gridGeom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+gridGeom.setAttribute('color', new THREE.BufferAttribute(col, 3));
+const mat = new THREE.MeshPhongMaterial({
+  vertexColors: true, side: THREE.DoubleSide, shininess: 20,
+  wireframe: false, transparent: true, opacity: 0.95,
+});
+const mesh = new THREE.Mesh(gridGeom, mat);
+scene.add(mesh);
+const wireMat = new THREE.MeshBasicMaterial({ vertexColors: true, wireframe: true });
+const wireMesh = new THREE.Mesh(gridGeom, wireMat);
+wireMesh.visible = false;
+scene.add(wireMesh);
+
+// viridis-like gradient
+const GRAD = [[68,1,84],[71,44,122],[59,81,139],[44,113,142],[33,145,140],
+              [39,173,129],[92,200,99],[170,220,50],[253,231,37]];
+function gradColor(t) {
+  t = Math.min(1, Math.max(0, t)) * (GRAD.length - 1);
+  const i = Math.min(GRAD.length - 2, Math.floor(t));
+  const f = t - i;
+  const a = GRAD[i], b = GRAD[i + 1];
+  return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f];
+}
+
+function ampMax() {
+  let mx = 1;
+  for (let i = 0; i < frames.length; i++) {
+    const f = frames[i];
+    for (let s = 0; s < f.length; s++) if (f[s] > mx) mx = f[s];
+  }
+  return mx;
+}
+
+let lastRender = 0;
+function rebuild() {
+  const T = frames.length;
+  const mx = ampMax();
+  const zoff = (N_SUB - 1) / 2;
+  for (let t = 0; t < MAX_FRAMES; t++) {
+    const frame = t < T ? frames[T - 1 - t] : null;
+    const x = t;
+    for (let s = 0; s < N_SUB; s++) {
+      const k = (t * N_SUB + s) * 3;
+      pos[k] = x;
+      pos[k + 1] = frame ? frame[s] : 0;
+      pos[k + 2] = s - zoff;
+      const c = frame ? gradColor(frame[s] / mx) : [40, 40, 40];
+      col[k] = c[0] / 255; col[k + 1] = c[1] / 255; col[k + 2] = c[2] / 255;
+    }
+  }
+  gridGeom.attributes.position.needsUpdate = true;
+  gridGeom.attributes.color.needsUpdate = true;
+}
+
+function animate(t) {
+  requestAnimationFrame(animate);
+  if (frames.length && t - lastRender > 50) { rebuild(); lastRender = t; }
+  controls.update();
+  renderer.render(scene, camera);
+}
+
+// ---------- serial ----------
+let lineBuf = '';
+async function readLoop() {
+  while (reader) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    lineBuf += new TextDecoder().decode(value);
+    let nl;
+    while ((nl = lineBuf.indexOf('\n')) >= 0) {
+      const line = lineBuf.slice(0, nl).trim();
+      lineBuf = lineBuf.slice(nl + 1);
+      if (line.startsWith('CSI_DATA')) handleFrame(parseCsiLine(line));
+    }
+  }
+  await disconnect();
+}
+
+function handleFrame(r) {
+  if (!r) return;
+  frames.push(r.amp);
+  if (frames.length > MAX_FRAMES) frames.shift();
+  count++;
+  const now = performance.now();
+  if (now - lastTs > 1000) { fps = Math.round(count * 1000 / (now - lastTs)); count = 0; lastTs = now; }
+  rssiHist.push(r.rssi);
+  if (rssiHist.length > 300) rssiHist.shift();
+  drawSpark();
+  statsEl.textContent =
+    `frames:${frames.length}/${MAX_FRAMES}  ${fps}/s  ch:${r.channel}`;
+  document.getElementById('rssiNote').textContent = `RSSI: ${r.rssi} dBm`;
+}
+
+async function connect() {
+  if (!navigator.serial) {
+    statusEl.textContent = 'Web Serial unavailable — open via https:// or localhost (python3 -m http.server 8000), or use Chrome/Edge.';
+    return;
+  }
+  try {
+    port = await navigator.serial.requestPort();
+    await port.open({ baudRate: 921600 });
+    reader = port.readable.getReader();
+    statusEl.textContent = `Connected: ${port.getInfo().usbProductId ? 'USB device' : ''} 921600 baud — awaiting CSI...`;
+    readLoop();
+  } catch (e) {
+    statusEl.textContent = 'connect cancelled/failed';
+  }
+}
+async function disconnect() {
+  if (reader) { try { await reader.cancel(); } catch (e) {} reader = null; }
+  if (port) { try { await port.close(); } catch (e) {} port = null; }
+  statusEl.textContent = 'Disconnected';
+}
+
+// ---------- CSV replay ----------
+document.getElementById('file').addEventListener('change', async (ev) => {
+  const f = ev.target.files[0];
+  if (!f) return;
+  await disconnect();
+  const text = await f.text();
+  frames = []; let loaded = 0;
+  for (const raw of text.split('\n')) {
+    const line = raw.trim();
+    if (!line.startsWith('CSI_DATA')) continue;
+    const r = parseCsiLine(line);
+    if (r) { frames.push(r.amp); if (frames.length > MAX_FRAMES) frames.shift(); loaded++; }
+  }
+  statusEl.textContent = `Loaded CSV: ${loaded} frames`;
+});
+
+// ---------- sparkline ----------
+const spark = document.getElementById('spark');
+const sctx = spark.getContext('2d');
+function drawSpark() {
+  const w = spark.width = spark.clientWidth * devicePixelRatio;
+  const h = spark.height = spark.clientHeight * devicePixelRatio;
+  sctx.clearRect(0, 0, w, h);
+  sctx.strokeStyle = '#58a6ff'; sctx.lineWidth = 2;
+  const n = rssiHist.length;
+  if (n < 2) return;
+  const mn = Math.min(...rssiHist), mx = Math.max(...rssiHist);
+  const span = (mx - mn) || 1;
+  sctx.beginPath();
+  for (let i = 0; i < n; i++) {
+    const x = i / (n - 1) * w;
+    const y = h - (rssiHist[i] - mn) / span * (h - 6) - 3;
+    i ? sctx.lineTo(x, y) : sctx.moveTo(x, y);
+  }
+  sctx.stroke();
+}
+
+// ---------- controls ----------
+btnPause.onclick = () => {
+  paused = !paused;
+  btnPause.textContent = paused ? 'Resume' : 'Pause';
+};
+btnWire.onclick = () => {
+  wireframe = !wireframe;
+  mesh.visible = !wireframe; wireMesh.visible = wireframe;
+  btnWire.textContent = wireframe ? 'Surface' : 'Wireframe';
+};
+document.getElementById('btnConnect').onclick = connect;
+
+window.addEventListener('resize', () => {
+  const el = document.getElementById('view3d');
+  camera.aspect = el.clientWidth / el.clientHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(el.clientWidth, el.clientHeight);
+});
+resize();
+renderer.setSize(document.getElementById('view3d').clientWidth,
+                 document.getElementById('view3d').clientHeight);
+requestAnimationFrame(animate);
+</script>
+</body>
+</html>

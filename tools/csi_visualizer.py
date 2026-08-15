@@ -68,10 +68,15 @@ def amp_of(vals):
     return np.hypot(p[:, 0], p[:, 1])
 
 
-def render(rows, out="heatmap.png"):
+def clean_rows(rows):
+    """Keep only rows matching the modal frame length (drop fragmented reads)."""
     from collections import Counter
     target = Counter(len(r["data"]) for r in rows).most_common(1)[0][0]
-    rows = [r for r in rows if len(r["data"]) == target]
+    return [r for r in rows if len(r["data"]) == target], target
+
+
+def render(rows, out="heatmap.png"):
+    rows, target = clean_rows(rows)
     amps = np.stack([amp_of(r["data"]) for r in rows])
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), height_ratios=[3, 1])
     ax1.imshow(amps.T, aspect="auto", origin="lower", cmap="viridis",
