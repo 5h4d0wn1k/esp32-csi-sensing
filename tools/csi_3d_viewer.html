@@ -81,6 +81,8 @@ const statsEl = document.getElementById('stats');
 const statusEl = document.getElementById('status');
 const btnPause = document.getElementById('btnPause');
 const btnWire = document.getElementById('btnWire');
+const VER = '5.1';
+statusEl.textContent = 'v' + VER + ' — click "Connect Hub"';
 
 let ws = null, port = null, reader = null;
 let paused = false, wireframe = false;
@@ -138,6 +140,7 @@ try {
   gridGeom.setIndex(idx);
   gridGeom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
   gridGeom.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  gridGeom.computeVertexNormals();
   const mat = new THREE.MeshPhongMaterial({
     vertexColors: true, side: THREE.DoubleSide, shininess: 20,
     transparent: true, opacity: 0.95,
@@ -176,6 +179,7 @@ try {
     }
     gridGeom.attributes.position.needsUpdate = true;
     gridGeom.attributes.color.needsUpdate = true;
+    gridGeom.computeVertexNormals();
   }
   function animate(t) {
     requestAnimationFrame(animate);
@@ -266,6 +270,7 @@ function connectHub() {
   ws.onopen = () => statusEl.textContent = 'Hub connected — waiting for CSI...';
   ws.onmessage = (ev) => {
     if (paused) return;
+    if (typeof ev.data !== 'string') return;  // defensive: we only send text frames
     let r; try { r = JSON.parse(ev.data); } catch (e) { return; }
     if (r.kind === 'csi') handleFrame(r);
   };
@@ -398,6 +403,9 @@ btnWire.onclick = () => {
 };
 document.getElementById('btnHub').onclick = connectHub;
 document.getElementById('btnSerial').onclick = connectSerial;
+
+// auto-connect when opened as ?auto=1 (also used for headless tests)
+if (new URLSearchParams(location.search).has('auto')) connectHub();
 </script>
 </body>
 </html>

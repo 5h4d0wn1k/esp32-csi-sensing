@@ -29,9 +29,9 @@ import threading
 log = logging.getLogger("hub")
 
 RE_CSI = re.compile(
-    r'CSI_DATA,(\d+),([0-9a-f:]+),(-?\d+),(\d+),(\d+),(\d+),(\d+),(\d+),(\d+),(\d+),(\d+),'
-    r'(\d+),(\d+),(-?\d+),(\d+),(\d+),(\d+),(\d+),(\d+),(\d+),(\d+),(\d+),(\d+),'
-    r'"(\[[^\]]*\])"')
+    r'CSI_DATA,(-?\d+),([0-9a-f:]+),(-?\d+),(-?\d+),(-?\d+),(-?\d+),(-?\d+),(-?\d+),'
+    r'(-?\d+),(-?\d+),(-?\d+),(-?\d+),(-?\d+),(-?\d+),(-?\d+),(-?\d+),(-?\d+),'
+    r'(-?\d+),(-?\d+),(-?\d+),(-?\d+),(-?\d+),(-?\d+),"(\[[^\]]*\])"')
 
 
 class SerialCsiSource:
@@ -139,7 +139,7 @@ async def main():
     clients = set()
 
     async def broadcast(msg):
-        payload = json.dumps(msg).encode()
+        payload = json.dumps(msg)  # text frame — browsers expect string in ev.data
         if not clients:
             await asyncio.sleep(0)
             return

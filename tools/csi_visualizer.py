@@ -29,9 +29,9 @@ HEADER = ("type,id,mac,rssi,rate,sig_mode,mcs,bandwidth,smoothing,not_sounding,"
 
 # 23 fields before the quoted data array
 ROW_RE = re.compile(
-    r'CSI_DATA,(\d+),([0-9a-f:]+),(-?\d+),(\d+),(\d+),(\d+),(\d+),(\d+),(\d+),(\d+),'
-    r'(\d+),(\d+),(\d+),(-?\d+),(\d+),(\d+),(\d+),(\d+),(\d+),(\d+),(\d+),(\d+),(\d+),'
-    r'"(\[[^\]]*\])"')
+    r'CSI_DATA,(-?\d+),([0-9a-f:]+),(-?\d+),(-?\d+),(-?\d+),(-?\d+),(-?\d+),(-?\d+),'
+    r'(-?\d+),(-?\d+),(-?\d+),(-?\d+),(-?\d+),(-?\d+),(-?\d+),(-?\d+),(-?\d+),'
+    r'(-?\d+),(-?\d+),(-?\d+),(-?\d+),(-?\d+),(-?\d+),"(\[[^\]]*\])"')
 
 
 def fields(line):
