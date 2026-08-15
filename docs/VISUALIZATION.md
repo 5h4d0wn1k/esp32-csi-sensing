@@ -3,25 +3,39 @@
 ## Architecture: dumb sensor board, smart host
 The NodeMCU runs `csi_recv` — it **only streams raw CSI** and does no
 analysis. All processing (3D surface, heatmaps, motion/presence detection,
-logging) happens on the host: in the browser via Web Serial, or in Python.
+logging) happens on the host: in the browser, or in Python.
 This keeps the ESP32 CPU free for capture throughput (45–70 frames/s) and
 lets the analysis evolve without reflashing firmware.
 
+## Sensor hub (`tools/sensorhub.py`) — WebSocket bridge
+The hub reads the serial stream in a **dedicated thread** and broadcasts every
+raw CSI frame over WebSocket to any number of browser tabs/devices. This means
+the viewer works in **any browser** (Firefox, Android, no Web Serial needed).
+
+```
+python sensorhub.py -s /dev/ttyUSB0:921600       # run on the PC
+# WS: ws://127.0.0.1:8765   →  {"src","kind","rssi","ch","nsub","amp":[...]}
+```
+
+The hub is a **source registry** — add more sources (2nd ESP32, CSI from a
+WiFi adapter in monitor mode, nRF24/HC-12/BT bridges) and every client sees
+all of them.
+
 ## 3D Viewer (`tools/csi_3d_viewer.html`)
-Proper-3D amplitude surface (Three.js), **all processing in the browser**:
+Proper-3D amplitude surface (Three.js, bundled locally in `tools/lib/` — no
+CDN), **all processing in the browser**:
 - **X** = time, **Z** = subcarrier index, **Y** = amplitude, colored viridis
 - Drag = rotate, wheel = zoom, right-drag = pan
 - **MOTION badge**: host-side presence detection — auto-calibrates its
   threshold on the first 30 static frames, then flags ACTIVE/INACTIVE with
   debounce, with a live deviation-metric sparkline
-- **Live mode**: Chrome/Edge → "Connect (Web Serial)" → pick `/dev/ttyUSB0`
-  (921600 baud) → scrolling surface
+- **"Connect Hub (WS)"** = primary transport (any browser)
+- **"Web Serial"** = fallback where Chrome/Edge allows
 - **Replay**: "Load capture" → any `CSI_DATA` CSV from `data/captures/`
 
 To open:
-- Direct: `file://.../csi_3d_viewer.html` (works in Chrome/Edge), or
-- `http://127.0.0.1:8000/csi_3d_viewer.html` (local server, Web Serial needs
-  https/localhost; a server is already running on port 8000)
+- `http://127.0.0.1:8000/csi_3d_viewer.html` — local server already running;
+  **hard-refresh (Ctrl+Shift+R)** after updates to bypass cache
 
 ## 2D heatmap (`tools/csi_visualizer.py`)
 ```
