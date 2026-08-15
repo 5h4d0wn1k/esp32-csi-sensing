@@ -12,17 +12,24 @@ Sources (add more here — this is the registry):
                (e.g. /dev/ttyUSB0 at 921600 baud)
 
 Client protocol (JSON, one object per line over the WS):
-  {"src":"nodemcu","kind":"csi","rssi":-6,"ch":11,"nsub":192,"amp":[...]}
+  {"src":"nodemcu","kind":"csi","mac":"00:17:7c:74:1d:35","rssi":-51,"ch":6,"nsub":64,"amp":[...]}
+
+Supported CSI line formats (auto-detected by presence of a MAC in field 2):
+  csi_recv_router (ESP32, joins AP + pings it):  CSI_DATA,<len>,<mac>,<rssi>,<rate>,...,<ch>,...,"<data>"
+  csi_recv (ESP32, ESP-NOW):                     CSI_DATA,<len>,<rssi>,<rate>,...,<ch>,...,"<data>"
+Any even subcarrier count >= 32 is accepted (64 for LLTF router capture,
+192 for the ESP-NOW HT40 link).
 
 Usage:
-  python sensorhub.py --port 8765 --http 8000            # serial autodetect
-  python sensorhub.py -s ttyUSB0:921600 -s ttyACM0:2000000
+  python sensorhub.py -p 8765 -s /dev/ttyUSB0:921600       # serve WS on 8765
+  (serve the tools dir separately with: python -m http.server 8000)
 """
 import argparse
 import asyncio
 import glob
 import json
 import logging
+import math
 import re
 import threading
 
@@ -62,13 +69,23 @@ class SerialCsiSource:
         vals = [int(x) for x in re.findall(r"-?\d+", g[23])]
         if len(vals) < 2:
             return None
+        has_mac = ":" in g[1]
+        if has_mac:                       # csi_recv_router: CSI_DATA,<id>,<mac>,<rssi>,...<ch>,...
+            mac, rssi, ch = g[1], int(g[2]), int(g[15])
+        else:                             # legacy csi_recv: CSI_DATA,<id>,<rssi>,<rate>,...<ch>,...
+            mac, rssi, ch = None, int(g[2]), int(g[15])
         n = len(vals) // 2 * 2
-        if n // 2 != 192:  # only canonical 192-subcarrier frames (drop glitches)
+        if n // 2 < 32:  # drop truncated glitch frames, keep 64/128/192-subcarrier frames
             return None
-        amp = [int((vals[i] ** 2 + vals[i + 1] ** 2) ** 0.5) for i in range(0, n, 2)]
+        amp = []
+        ph = []
+        for i in range(0, n, 2):
+            im, rl = vals[i], vals[i + 1]
+            amp.append(int((im * im + rl * rl) ** 0.5))
+            ph.append(int(math.degrees(math.atan2(rl, im))))
         return {"src": self.name, "kind": "csi",
-                "rssi": int(g[2]), "ch": int(g[15]),
-                "nsub": len(amp), "amp": amp}
+                "mac": mac, "rssi": rssi, "ch": ch,
+                "nsub": len(amp), "amp": amp, "ph": ph}
 
     def _reader(self):
         """Blocking serial read loop, runs in a dedicated thread."""
@@ -84,7 +101,7 @@ class SerialCsiSource:
                     item = self._parse(line)
                     if item is not None and self._loop and self.q is not None:
                         try:
-                            self._loop.call_soon_threadsafe(self.q.put_nowait, item)
+                            self._loop.call_soon_threadsafe(self._safe_put, item)
                         except Exception:
                             pass
             except Exception as e:
@@ -97,9 +114,15 @@ class SerialCsiSource:
                     time.sleep(2)
                 buf = b""
 
+    def _safe_put(self, item):
+        try:
+            self.q.put_nowait(item)
+        except asyncio.QueueFull:
+            pass
+
     async def stream(self, broadcast):
         import time
-        self.q = asyncio.Queue(maxsize=512)
+        self.q = asyncio.Queue(maxsize=4096)
         self._loop = asyncio.get_running_loop()
         threading.Thread(target=self._reader, name=f"ser-{self.name}",
                          daemon=True).start()

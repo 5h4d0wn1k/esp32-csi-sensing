@@ -74,19 +74,19 @@ try {
   throw e;
 }
 
-const N_SUB = 192, MAX_FRAMES = 150;
+let N_SUB = 0, MAX_FRAMES = 150;
 const RE = /^CSI_DATA,(\d+),([0-9a-f:]+),(-?\d+),(\d+),(\d+),(\d+),(\d+),(\d+),(\d+),(\d+),(\d+),(\d+),(\d+),(-?\d+),(\d+),(\d+),(\d+),(\d+),(\d+),(\d+),(\d+),(\d+),(\d+),"(\[[^\]]*\])"$/;
 
 const statsEl = document.getElementById('stats');
 const statusEl = document.getElementById('status');
 const btnPause = document.getElementById('btnPause');
 const btnWire = document.getElementById('btnWire');
-const VER = '5.1';
+const VER = '5.2';
 statusEl.textContent = 'v' + VER + ' — click "Connect Hub"';
 
 let ws = null, port = null, reader = null;
 let paused = false, wireframe = false;
-let mesh = null, wireMesh = null;
+let mesh = null, wireMesh = null, scene = null, applyNSub = null;
 let frames = [], srcName = '-';
 let count = 0, fps = 0, lastTs = 0, rssiHist = [];
 
@@ -94,6 +94,10 @@ let count = 0, fps = 0, lastTs = 0, rssiHist = [];
 const MWIN = 30, MDEB = 2;
 let mState = 'INACTIVE', mHold = 0, mThr = null, mCal = [];
 let mHist = [];
+let phs = [];
+
+// ---- dominant-source selection (multi-transmitter capture) ----
+let srcCounts = {}, activeMac = null, lastSrcEval = 0;
 
 function parseCsiLine(line) {
   const m = RE.exec(line);
@@ -111,7 +115,7 @@ function parseCsiLine(line) {
 // ---------- 3D scene ----------
 let camera, renderer;
 try {
-  const scene = new THREE.Scene();
+  scene = new THREE.Scene();
   scene.background = new THREE.Color(0x0d1117);
   camera = new THREE.PerspectiveCamera(55, 2, 0.1, 2000);
   camera.position.set(90, 55, 120);
@@ -119,38 +123,50 @@ try {
   renderer.setPixelRatio(window.devicePixelRatio);
   document.getElementById('view3d').appendChild(renderer.domElement);
   const controls = new OrbitControls(camera, renderer.domElement);
-  controls.target.set(60, 20, N_SUB / 2);
+  controls.target.set(60, 20, 0);
 
   scene.add(new THREE.AmbientLight(0xffffff, 0.55));
   const dl = new THREE.DirectionalLight(0xffffff, 0.8);
   dl.position.set(80, 120, 40);
   scene.add(dl);
 
-  const gridGeom = new THREE.BufferGeometry();
-  const verts = N_SUB * MAX_FRAMES;
-  const pos = new Float32Array(verts * 3);
-  const col = new Float32Array(verts * 3);
-  const idx = [];
-  for (let f = 0; f < MAX_FRAMES - 1; f++) {
-    for (let s = 0; s < N_SUB - 1; s++) {
-      const a = f * N_SUB + s, b = a + 1, c = a + N_SUB, d = c + 1;
-      idx.push(a, b, c, b, d, c);
+  let gridGeom = null, pos = null, col = null;
+  function makeSurface(nSub) {
+    if (mesh) { scene.remove(mesh); scene.remove(wireMesh); mesh.geometry.dispose(); }
+    const v = nSub * MAX_FRAMES;
+    pos = new Float32Array(v * 3);
+    col = new Float32Array(v * 3);
+    const idx = [];
+    for (let f = 0; f < MAX_FRAMES - 1; f++) {
+      for (let s = 0; s < nSub - 1; s++) {
+        const a = f * nSub + s, b = a + 1, c = a + nSub, d = c + 1;
+        idx.push(a, b, c, b, d, c);
+      }
     }
+    gridGeom = new THREE.BufferGeometry();
+    gridGeom.setIndex(idx);
+    gridGeom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    gridGeom.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    gridGeom.computeVertexNormals();
+    const mat = new THREE.MeshPhongMaterial({
+      vertexColors: true, side: THREE.DoubleSide, shininess: 20,
+      transparent: true, opacity: 0.95,
+    });
+    const m = new THREE.Mesh(gridGeom, mat);
+    scene.add(m); mesh = m;
+    const wireMat = new THREE.MeshBasicMaterial({ vertexColors: true, wireframe: true });
+    const w = new THREE.Mesh(gridGeom, wireMat);
+    w.visible = false;
+    scene.add(w); wireMesh = w;
   }
-  gridGeom.setIndex(idx);
-  gridGeom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  gridGeom.setAttribute('color', new THREE.BufferAttribute(col, 3));
-  gridGeom.computeVertexNormals();
-  const mat = new THREE.MeshPhongMaterial({
-    vertexColors: true, side: THREE.DoubleSide, shininess: 20,
-    transparent: true, opacity: 0.95,
-  });
-  const meshTmp = new THREE.Mesh(gridGeom, mat);
-  scene.add(meshTmp); mesh = meshTmp;
-  const wireMat = new THREE.MeshBasicMaterial({ vertexColors: true, wireframe: true });
-  const wireTmp = new THREE.Mesh(gridGeom, wireMat);
-  wireTmp.visible = false;
-  scene.add(wireTmp); wireMesh = wireTmp;
+  applyNSub = function (nSub) {
+    if (nSub === N_SUB) return;
+    N_SUB = nSub;
+    controls.target.set(60, 20, N_SUB / 2);
+    makeSurface(nSub);
+    frames.length = 0; phs.length = 0; mHist.length = 0; mCal.length = 0; mThr = null; rssiHist.length = 0;
+    srcCounts = {}; activeMac = null; lastSrcEval = 0;
+  };
 
   const GRAD = [[68,1,84],[71,44,122],[59,81,139],[44,113,142],[33,145,140],
                 [39,173,129],[92,200,99],[170,220,50],[253,231,37]];
@@ -205,14 +221,27 @@ try {
 
 // ---------- data entry ----------
 function handleFrame(r) {
-  if (!r || !r.amp || r.amp.length !== N_SUB) return;
+  if (!r || !r.amp) return;
+  if (applyNSub && r.nsub && r.nsub !== N_SUB) applyNSub(r.nsub);
+  if (r.amp.length !== N_SUB) return;
+  const now = performance.now();
+  if (r.mac) srcCounts[r.mac] = (srcCounts[r.mac] || 0) + 1;
+  if (now - lastSrcEval > 2000) {
+    let best = null, bn = 0;
+    for (const m in srcCounts) if (srcCounts[m] > bn) { bn = srcCounts[m]; best = m; }
+    if (best && best !== activeMac) activeMac = best;
+    srcCounts = {}; lastSrcEval = now;
+  }
+  if (activeMac && r.mac && r.mac !== activeMac) return;
   if (r.src) srcName = r.src;
   frames.push(r.amp);
+  phs.push(r.ph);
   if (frames.length > MAX_FRAMES) frames.shift();
+  if (phs.length > MAX_FRAMES) phs.shift();
   count++;
-  const now = performance.now();
-  if (now - lastTs > 1000) {
-    fps = Math.round(count * 1000 / (now - lastTs)); count = 0; lastTs = now;
+  const now2 = performance.now();
+  if (now2 - lastTs > 1000) {
+    fps = Math.round(count * 1000 / (now2 - lastTs)); count = 0; lastTs = now2;
     statusEl.textContent = `Receiving CSI — ${fps}/s from ${srcName}`;
   }
   if (r.rssi !== undefined) {
@@ -222,7 +251,8 @@ function handleFrame(r) {
   runMotion(r.amp);
   drawSpark(); drawMSpark();
   statsEl.textContent =
-    `src:${srcName}  frames:${frames.length}/${MAX_FRAMES}  ${fps}/s` +
+    `src:${srcName}` + (activeMac ? ` [${activeMac}]` : '') +
+    `  frames:${frames.length}/${MAX_FRAMES}  ${fps}/s` +
     (r.ch ? `  ch:${r.ch}` : '');
   if (r.rssi !== undefined)
     document.getElementById('rssiNote').textContent = `RSSI: ${r.rssi} dBm`;
@@ -231,22 +261,50 @@ function handleFrame(r) {
 function runMotion(amp) {
   if (frames.length < 2) return;
   const win = frames.slice(-Math.min(MWIN, frames.length));
-  let base = new Float32Array(N_SUB);
-  for (const f of win) for (let s = 0; s < N_SUB; s++) base[s] += f[s];
-  for (let s = 0; s < N_SUB; s++) base[s] /= win.length;
-  let dev = 0;
-  for (let s = 0; s < N_SUB; s++) dev += Math.abs(amp[s] - base[s]);
-  dev /= N_SUB;
+  const pwin = phs.slice(-win.length);
+  const hasPh = phs.length === frames.length && pwin.every(p => p && p.length === N_SUB);
+  // Per-frame normalisation: divide each frame by its own mean magnitude so the
+  // receiver AGC gain steps (2x jumps) cancel out and only the CSI *shape* change
+  // from body motion remains.
+  const mag = (f) => { let s = 0; for (const v of f) s += v; return s / f.length + 1e-6; };
+  const winMag = win.map(mag), curMag = mag(amp);
+  let dev;
+  if (hasPh) {
+    const cur = pwin[pwin.length - 1];
+    let acc = 0;
+    for (let s = 0; s < N_SUB; s++) {
+      let re = 0, im = 0;
+      for (let k = 0; k < win.length; k++) {
+        const ph = pwin[k][s] * Math.PI / 180, a = win[k][s] / winMag[k];
+        re += a * Math.cos(ph); im += a * Math.sin(ph);
+      }
+      re /= win.length; im /= win.length;
+      const a0 = Math.hypot(re, im) + 1e-6;
+      const ph = cur[s] * Math.PI / 180, a = amp[s] / curMag;
+      acc += Math.hypot(a * Math.cos(ph) - re, a * Math.sin(ph) - im) / a0;
+    }
+    dev = acc / N_SUB;
+  } else {
+    let base = new Float32Array(N_SUB);
+    for (let k = 0; k < win.length; k++)
+      for (let s = 0; s < N_SUB; s++) base[s] += win[k][s] / winMag[k];
+    for (let s = 0; s < N_SUB; s++) base[s] /= win.length;
+    let acc = 0;
+    for (let s = 0; s < N_SUB; s++) acc += Math.abs(amp[s] / curMag - base[s]) / (base[s] + 1e-6);
+    dev = acc / N_SUB;
+  }
   mHist.push(dev);
   if (mHist.length > 300) mHist.shift();
   if (mThr === null) {
     mCal.push(dev);
     if (mCal.length >= MWIN) {
-      const mean = mCal.reduce((a, b) => a + b, 0) / mCal.length;
-      const sd = Math.sqrt(mCal.reduce((a, b) => a + (b - mean) ** 2, 0) / mCal.length);
-      mThr = mean + 3 * sd;
+      const srt = [...mCal].sort((a, b) => a - b);
+      const med = srt[srt.length >> 1];
+      const absd = mCal.map(d => Math.abs(d - med)).sort((a, b) => a - b);
+      const mad = absd[absd.length >> 1] * 1.4826 || 1e-6;
+      mThr = med + 3 * mad;   // robust median+MAD threshold (immune to AGC spikes)
       document.getElementById('motionThr').textContent =
-        `threshold: ${mThr.toFixed(2)} (auto-calibrated on first ${MWIN} frames)`;
+        `threshold: ${mThr.toFixed(2)} (median+MAD on first ${MWIN} frames)`;
     } else {
       document.getElementById('motionThr').textContent =
         `calibrating static baseline... ${mCal.length}/${MWIN}`;
