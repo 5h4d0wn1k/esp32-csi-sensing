@@ -22,6 +22,8 @@
           display:flex; flex-direction:column; gap:8px; }
   canvas#spark { width:100%; height:90px; background:#0d1117;
                  border:1px solid #30363d; }
+  canvas#mspark { width:100%; height:90px; background:#0d1117;
+                   border:1px solid #30363d; }
   .note { font-size:11px; color:#8b949e; }
   input[type=file] { color:#e6edf3; }
 </style>
@@ -46,9 +48,13 @@
   <div id="side">
     <div class="note">Amplitude surface: X = time, Z = subcarrier, Y = amplitude.
       Drag to rotate, wheel to zoom, right-drag to pan.</div>
+    <div class="note" id="motionNote" style="font-size:15px;font-weight:bold">MOTION: --</div>
+    <div class="note" id="motionThr">calibrating...</div>
     <div class="note" id="rssiNote">RSSI: --</div>
     <canvas id="spark"></canvas>
     <div class="note" id="sparkNote">RSSI over time</div>
+    <canvas id="mspark"></canvas>
+    <div class="note" id="msparkNote">motion metric (deviation) — red line = threshold</div>
   </div>
 </div>
 
@@ -68,6 +74,11 @@ let port = null, reader = null, paused = false, wireframe = false;
 let frames = [];            // ring of Float32Array(N_SUB)
 let count = 0, fps = 0, lastTs = 0;
 let rssiHist = [];
+
+// ---- host-side motion detection (all processing here in the browser) ----
+const MWIN = 30, MDEB = 2;
+let mState = 'INACTIVE', mHold = 0, mThr = null, mCal = [];
+let mHist = [];              // deviation metric history
 
 // ---------- parser ----------
 function parseCsiLine(line) {
@@ -198,10 +209,48 @@ function handleFrame(r) {
   if (now - lastTs > 1000) { fps = Math.round(count * 1000 / (now - lastTs)); count = 0; lastTs = now; }
   rssiHist.push(r.rssi);
   if (rssiHist.length > 300) rssiHist.shift();
+  runMotion(r.amp);
   drawSpark();
+  drawMSpark();
   statsEl.textContent =
     `frames:${frames.length}/${MAX_FRAMES}  ${fps}/s  ch:${r.channel}`;
   document.getElementById('rssiNote').textContent = `RSSI: ${r.rssi} dBm`;
+}
+
+// deviation of the newest frame from the rolling mean amplitude profile
+function runMotion(amp) {
+  if (frames.length < 2) return;
+  const win = frames.slice(-Math.min(MWIN, frames.length));
+  let base = new Float32Array(N_SUB);
+  for (const f of win) for (let s = 0; s < N_SUB; s++) base[s] += f[s];
+  for (let s = 0; s < N_SUB; s++) base[s] /= win.length;
+  let dev = 0;
+  for (let s = 0; s < N_SUB; s++) dev += Math.abs(amp[s] - base[s]);
+  dev /= N_SUB;
+  mHist.push(dev);
+  if (mHist.length > 300) mHist.shift();
+
+  if (mThr === null) {
+    mCal.push(dev);
+    if (mCal.length >= MWIN) {
+      const mean = mCal.reduce((a, b) => a + b, 0) / mCal.length;
+      const sd = Math.sqrt(mCal.reduce((a, b) => a + (b - mean) ** 2, 0) / mCal.length);
+      mThr = mean + 3 * sd;
+      document.getElementById('motionThr').textContent =
+        `threshold: ${mThr.toFixed(2)} (auto-calibrated on first ${MWIN} frames)`;
+    } else {
+      document.getElementById('motionThr').textContent =
+        `calibrating static baseline... ${mCal.length}/${MWIN}`;
+    }
+    return;
+  }
+  const want = dev > mThr ? 'ACTIVE' : 'INACTIVE';
+  if (want !== mState) {
+    if (++mHold >= MDEB) { mState = want; mHold = 0; }
+  } else mHold = 0;
+  const el = document.getElementById('motionNote');
+  el.textContent = 'MOTION: ' + mState;
+  el.style.color = mState === 'ACTIVE' ? '#f85149' : '#3fb950';
 }
 
 async function connect() {
@@ -244,6 +293,8 @@ document.getElementById('file').addEventListener('change', async (ev) => {
 // ---------- sparkline ----------
 const spark = document.getElementById('spark');
 const sctx = spark.getContext('2d');
+const mspark = document.getElementById('mspark');
+const mctx = mspark.getContext('2d');
 function drawSpark() {
   const w = spark.width = spark.clientWidth * devicePixelRatio;
   const h = spark.height = spark.clientHeight * devicePixelRatio;
@@ -260,6 +311,30 @@ function drawSpark() {
     i ? sctx.lineTo(x, y) : sctx.moveTo(x, y);
   }
   sctx.stroke();
+}
+function drawMSpark() {
+  const w = mspark.width = mspark.clientWidth * devicePixelRatio;
+  const h = mspark.height = mspark.clientHeight * devicePixelRatio;
+  mctx.clearRect(0, 0, w, h);
+  const n = mHist.length;
+  if (n < 2) return;
+  const mx = Math.max(...mHist, mThr || 1);
+  mctx.strokeStyle = '#f0883e'; mctx.lineWidth = 2;
+  mctx.beginPath();
+  for (let i = 0; i < n; i++) {
+    const x = i / (n - 1) * w;
+    const y = h - mHist[i] / mx * (h - 6) - 3;
+    i ? mctx.lineTo(x, y) : mctx.moveTo(x, y);
+  }
+  mctx.stroke();
+  if (mThr !== null) {
+    mctx.strokeStyle = '#f85149'; mctx.setLineDash([4, 4]);
+    mctx.beginPath();
+    const y = h - mThr / mx * (h - 6) - 3;
+    mctx.moveTo(0, y); mctx.lineTo(w, y);
+    mctx.stroke();
+    mctx.setLineDash([]);
+  }
 }
 
 // ---------- controls ----------
