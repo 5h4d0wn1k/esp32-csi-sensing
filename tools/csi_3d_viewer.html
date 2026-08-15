@@ -201,13 +201,16 @@ try {
 
 // ---------- data entry ----------
 function handleFrame(r) {
-  if (!r || !r.amp || r.amp.length < 2) return;
+  if (!r || !r.amp || r.amp.length !== N_SUB) return;
   if (r.src) srcName = r.src;
   frames.push(r.amp);
   if (frames.length > MAX_FRAMES) frames.shift();
   count++;
   const now = performance.now();
-  if (now - lastTs > 1000) { fps = Math.round(count * 1000 / (now - lastTs)); count = 0; lastTs = now; }
+  if (now - lastTs > 1000) {
+    fps = Math.round(count * 1000 / (now - lastTs)); count = 0; lastTs = now;
+    statusEl.textContent = `Receiving CSI — ${fps}/s from ${srcName}`;
+  }
   if (r.rssi !== undefined) {
     rssiHist.push(r.rssi);
     if (rssiHist.length > 300) rssiHist.shift();
@@ -361,12 +364,14 @@ function drawMSpark() {
   mctx.clearRect(0, 0, w, h);
   const n = mHist.length;
   if (n < 2) return;
-  const mx = Math.max(...mHist, mThr || 1);
+  const clean = mHist.filter(v => Number.isFinite(v));
+  if (clean.length < 2) return;
+  const mx = Math.max(...clean, mThr || 1);
   mctx.strokeStyle = '#f0883e'; mctx.lineWidth = 2;
   mctx.beginPath();
-  for (let i = 0; i < n; i++) {
-    const x = i / (n - 1) * w;
-    const y = h - mHist[i] / mx * (h - 6) - 3;
+  for (let i = 0; i < clean.length; i++) {
+    const x = i / (clean.length - 1) * w;
+    const y = h - clean[i] / mx * (h - 6) - 3;
     i ? mctx.lineTo(x, y) : mctx.moveTo(x, y);
   }
   mctx.stroke();

@@ -63,6 +63,8 @@ class SerialCsiSource:
         if len(vals) < 2:
             return None
         n = len(vals) // 2 * 2
+        if n // 2 != 192:  # only canonical 192-subcarrier frames (drop glitches)
+            return None
         amp = [int((vals[i] ** 2 + vals[i + 1] ** 2) ** 0.5) for i in range(0, n, 2)]
         return {"src": self.name, "kind": "csi",
                 "rssi": int(g[2]), "ch": int(g[15]),
