@@ -10,15 +10,17 @@ umbrella. Repo is **private**; will be made public on request.
 
 ## Hardware
 - **Sender / illuminator:** ESP32-C6 WROOM — `csi_send` firmware, ESP-NOW beacons @100/s on ch6
-- **Router (2nd illuminator):** Digisol DHR-3400 (Airtel_Xstream, ch6) — captured via the receiver's promiscuous all-MAC mode (needs OFDM traffic; see `docs/PLACEMENT.md`)
-- **Receiver:** ESP32 NodeMCU — `csi_recv` firmware, ch6, **all-MAC capture**, streams CSI CSV over UART @921600
+- **Router (illuminator):** Digisol DHR-3400 (Airtel_Xstream, ch6) — the receiver joins it and self-pings (`csi_recv_router`), so the whole room is lit; see `docs/PLACEMENT.md`
+- **Receiver:** ESP32 NodeMCU — `csi_recv_router` firmware (primary demo: joins the AP and self-pings it, room-scale illumination) or `csi_recv` (all-MAC capture); streams CSI CSV over UART @921600
 
 ## Quick start
 ```bash
 # 1. Firmware (ESP-IDF v5.5; build on Linux FS, copy under firmware/)
 cd ~/esp/esp-csi/examples/get-started/csi_send && idf.py set-target esp32c6 && idf.py build && idf.py -p /dev/ttyACM0 flash
-cd ~/esp/esp-csi/examples/get-started/csi_recv && idf.py set-target esp32   && idf.py build && idf.py -p /dev/ttyUSB0 flash
-# both examples already modified in-tree: channel 6 + csi_recv captures ALL MACs
+# primary demo — receiver illuminates the room via the AP (see docs/PLACEMENT.md):
+cd ~/esp/esp-csi/examples/get-started/csi_recv_router && idf.py set-target esp32 && idf.py build && idf.py -p /dev/ttyUSB0 flash
+# alternative: all-MAC ESP-NOW sniffer (needs >=5 m sender-receiver separation)
+cd ~/esp/esp-csi/examples/get-started/csi_recv && idf.py set-target esp32 && idf.py build && idf.py -p /dev/ttyUSB0 flash
 
 # 2. Bridge + viewer (browser needs no Web Serial)
 python tools/sensorhub.py -p 8765 -s /dev/ttyUSB0:921600 &
@@ -31,14 +33,14 @@ python tools/motion_detector.py --csv data/captures/2026-08-15-nodemcu-csi-sampl
 ```
 
 ## Layout
-- `firmware/` — modified `app_main.c` for `csi_send` (ch6) and `csi_recv` (ch6, all-MAC)
+- `firmware/` — modified `app_main.c` for `csi_send` (ch6), `csi_recv` (ch6, all-MAC), `csi_recv_router` (joins AP + self-pings)
 - `tools/sensorhub.py` — WebSocket bridge: parses CSI CSV, tags MAC, emits `{amp,ph}` per frame
-- `tools/csi_3d_viewer.html` — v5.2: 3D surface, dominant-source selection, phase-aware gain-normalized motion, adaptive subcarrier count (64/192)
+- `tools/csi_3d_viewer.html` — v5.5: 3D surface, dominant-source selection, AGC-transient rejection, tail-level (p95) motion detector, adaptive subcarrier count (64/192)
 - `tools/csi_visualizer.py` / `tools/motion_detector.py` — heatmap + presence detector
 - `data/captures/` — sample captures and rendered plots
 - `docs/` — firmware/build notes, placement guide
 
 ## Notes
 - Classic ESP32 link: 192 subcarrier (im,re) pairs (`len=384`); router LLTF capture: 64 (`len=128`) — the hub/viewer adapt automatically
-- ~69 frames/s ESP-NOW @ ch6; 74/s router mode
-- Motion metric = per-frame gain-normalized complex deviation (phase+amplitude), median+MAD threshold
+- ~69 frames/s ESP-NOW @ ch6; 74–100/s router mode
+- Motion metric = gain-normalized amplitude deviation, AGC-transient-rejected, decided on the p95 tail of its 1.5 s rolling variance (threshold = cal p90 × 1.5). See `docs/PLACEMENT.md` for the physics limits and tuning.
