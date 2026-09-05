@@ -10,8 +10,8 @@ jobs:
   js-syntax:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 20
       - name: Check viewer JS syntax
@@ -20,8 +20,8 @@ jobs:
   python-check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Install deps
@@ -39,12 +39,12 @@ jobs:
   privacy-guard:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Fail on personal data strings (except docs/PRIVACY.md)
+      - uses: actions/checkout@v5
+      - name: Fail on personal data strings (except docs/PRIVACY.md and .github/)
         run: |
-          if git ls-files | grep -v '^docs/PRIVACY\.md$' | xargs -r grep -qiE 'Airtel|Digisol|cynik|5h4d0wn1k|00:17:7c:74:1d:35'; then
+          if git ls-files | grep -v '^docs/PRIVACY\.md$' | grep -v '^\.github/' | xargs -r grep -qiE 'Airtel|Digisol|cynik|5h4d0wn1k|00:17:7c:74:1d:35'; then
             echo "FAIL: personal data strings found in tracked files (see docs/PRIVACY.md for scrub rules)"
-            git ls-files | grep -v '^docs/PRIVACY\.md$' | xargs -r grep -liE 'Airtel|Digisol|cynik|5h4d0wn1k|00:17:7c:74:1d:35' || true
+            git ls-files | grep -v '^docs/PRIVACY\.md$' | grep -v '^\.github/' | xargs -r grep -liE 'Airtel|Digisol|cynik|5h4d0wn1k|00:17:7c:74:1d:35' || true
             exit 1
           fi
           echo "PASS: no personal data strings in tracked files"
