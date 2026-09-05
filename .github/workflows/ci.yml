@@ -1,0 +1,50 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  js-syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Check viewer JS syntax
+        run: bash scripts/check_viewer_js.sh
+
+  python-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        run: pip install numpy matplotlib websockets
+      - name: Byte-compile tools
+        run: python -m py_compile tools/*.py
+      - name: Smoke test analyze_session.py on sample session
+        run: |
+          if [ -f examples/sample_session/session.jsonl ]; then
+            python tools/analyze_session.py examples/sample_session/session.jsonl
+          else
+            echo "examples/sample_session/session.jsonl not present; skipping smoke test"
+          fi
+
+  privacy-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fail on personal data strings (except docs/PRIVACY.md)
+        run: |
+          if git ls-files | grep -v '^docs/PRIVACY\.md$' | xargs -r grep -qiE 'Airtel|Digisol|cynik|5h4d0wn1k|00:17:7c:74:1d:35'; then
+            echo "FAIL: personal data strings found in tracked files (see docs/PRIVACY.md for scrub rules)"
+            git ls-files | grep -v '^docs/PRIVACY\.md$' | xargs -r grep -liE 'Airtel|Digisol|cynik|5h4d0wn1k|00:17:7c:74:1d:35' || true
+            exit 1
+          fi
+          echo "PASS: no personal data strings in tracked files"

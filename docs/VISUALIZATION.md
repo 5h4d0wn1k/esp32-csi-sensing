@@ -53,9 +53,9 @@ python motion_detector.py -p /dev/ttyUSB0 -b 921600 -t 30 -o motion.png
 ## On-device presence (`esp_wifi_sensing` demo)
 Alternative that moves processing onto the ESP32 (higher power/CPU cost; only
 needed if there's no host). `~/esp/esp-csi/examples/esp-radar/wifi_sensing_demo`
-— built + flashed to the NodeMCU, joins **Airtel_Xstream** (open network, ch6),
+— built + flashed to the NodeMCU, joins **<YOUR_SSID>** (open network, ch6),
 senses the AP channel + 2 peer MACs, emits `HMS:` JSON (jitter/wander/motion_status).
-Verified live: sensing the Digisol AP `00:17:7c:74:1d:35` with updating jitter values.
+Verified live: sensing the the AP `<AP_MAC>` with updating jitter values.
 Reflash `csi_recv` afterwards to return the board to raw-streaming mode.
 
 ## Capture data format

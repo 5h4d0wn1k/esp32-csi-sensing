@@ -21,7 +21,7 @@ room-scale setup (`csi_recv_router`) or give the ESP-NOW nodes real separation.
 
 ## Router as a whole-room illuminator (primary demo)
 
-- Receiver NodeMCU runs `csi_recv_router`: it joins the AP (Airtel_Xstream, ch6)
+- Receiver NodeMCU runs `csi_recv_router`: it joins the AP (<YOUR_SSID>, ch6)
   and self-pings the router, producing ~74–100 CSI frames/s at 64 subcarriers,
   RSSI ≈ −56 dBm.
 - The all-MAC `csi_recv` promiscuous mode does **not** capture router→client

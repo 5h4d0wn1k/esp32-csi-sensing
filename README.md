@@ -5,12 +5,12 @@ and presence/motion detection. **Multi-transmitter**: the receiver tags every
 frame with the source MAC, so it can sense CSI from the ESP-NOW sender, the
 house Wi-Fi router, and any other transmitter on the channel at once.
 
-Part of the [`wireless-security-toolkit`](https://github.com/5h4d0wn1k/wireless-security-toolkit)
+Part of the `wireless-security-toolkit`
 umbrella. Repo is **private**; will be made public on request.
 
 ## Hardware
 - **Sender / illuminator:** ESP32-C6 WROOM — `csi_send` firmware, ESP-NOW beacons @100/s on ch6
-- **Router (illuminator):** Digisol DHR-3400 (Airtel_Xstream, ch6) — the receiver joins it and self-pings (`csi_recv_router`), so the whole room is lit; see `docs/PLACEMENT.md`
+- **Router (illuminator):** a consumer Wi-Fi AP (<YOUR_SSID>, ch6) — the receiver joins it and self-pings (`csi_recv_router`), so the whole room is lit; see `docs/PLACEMENT.md`
 - **Receiver:** ESP32 NodeMCU — `csi_recv_router` firmware (primary demo: joins the AP and self-pings it, room-scale illumination) or `csi_recv` (all-MAC capture); streams CSI CSV over UART @921600
 
 ## Quick start

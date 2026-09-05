@@ -1,0 +1,22 @@
+menu "OLED Status Display"
+
+    config OLED_ENABLE
+        bool "Enable SSD1306 OLED status display"
+        default y
+        help
+            Show motion/breath/CSI status from the host hub on a 128x64
+            SSD1306 panel over I2C.
+
+    config OLED_SDA
+        int "I2C SDA GPIO"
+        default 21
+
+    config OLED_SCL
+        int "I2C SCL GPIO"
+        default 22
+
+    config OLED_I2C_ADDR
+        hex "SSD1306 I2C address"
+        default 0x3C
+
+endmenu
