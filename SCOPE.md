@@ -1,6 +1,6 @@
 # SCOPE.md — Scope-checker for authorized testing
 
-Before you run **esp32\-csi\-sensing** against any live target, answer these four questions.
+Before you run **esp32-csi-sensing** against any live target, answer these four questions.
 Write the answers down. If you cannot answer "YES" to all four, **stop** — build
 a lab instead.
 
